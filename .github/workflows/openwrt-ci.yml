@@ -8,51 +8,186 @@
 name: OpenWrt-CI
 
 on:
+  # 在actions页面启用run workflow手动按钮，即可手工触发
+  # 在workflow_dispatch下通过定义inputs设定参数，在jobs中我们则可以在github.event.inputs中取到对应的参数
+  workflow_dispatch:
+  # 开启API执行，即通过http请求来手工启动，其中的opened，deleted是用户自定义的事件
+  # 例如使用curl：curl -X POST -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/{namespace}/{repo_name}/dispatches -d '{"event_type":"opened"}'
+  repository_dispatch:
+    types: [opened, deleted]
   schedule:
     - cron: 0 20 * * *
-
+  release:
+    types: [published]
+    
 permissions:
   contents: read
+  
 
 jobs:
 
   build_openwrt:
 
-    name: Build OpenWrt Firmware
+    permissions:
+      contents: write # for release creation
+
+    name: Build OpenWrt firmware
 
     runs-on: ubuntu-latest
 
+    if: github.event.repository.owner.id == github.event.sender.id || ! github.event.sender.id
+
     steps:
-      - name: Space cleanup and Initialization environment
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: master
+          fetch-depth: 0
+          
+      - name: cache
+        uses: klever1988/cachewrtbuild@main
+        with:
+          #是否一并缓存.ccache目录，如果你启用了ccache。这是唯一的常用参数，其他三个用于除错，一般不需要调整
+          ccache: false
+
+          #是否缓存工具链目录
+          toolchain: true
+
+          #是否跳过工具链编译
+          skip: true
+
+          #清空缓存
+          clean: false   
+
+      - name: Space cleanup
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           docker rmi `docker images -q`
-          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
-          sudo -E apt-mark hold grub-efi-amd64-signed
-          sudo -E apt update
-          sudo -E apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* dotnet* snap*
-          sudo -E apt -y full-upgrade
-          sudo -E apt -y install ack antlr3 aria2 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-          sudo -E systemctl daemon-reload
-          sudo -E apt -y autoremove --purge
-          sudo -E apt clean
-          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
+          sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* || true
+          sudo -E apt-get update 
+          sudo -E apt-get -y install ack antlr3 aria2 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
 
-      - name: Checkout OpenWrt
-        uses: actions/checkout@v3
+          df -h
 
       - name: Update feeds
         run: |
-          sed -i 's/#src-git helloworld/src-git helloworld/g' ./feeds.conf.default
+          echo  'src-git helloworld https://github.com/fw876/helloworld' >> ./feeds.conf.default
+          echo  'src-git kenzo https://github.com/kenzok8/openwrt-packages' >> ./feeds.conf.default
+          echo 'src-git small https://github.com/kenzok8/small' >> ./feeds.conf.default
+          sed -i 's/\"#src-git\"/\"src-git\"/g' ./feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
+          
       - name: Generate configuration file
-        run: make defconfig
-
-      - name: Download packages
-        run: make download -j16
+        run: |
+          rm -f ./.config*
+          touch ./.config
+          cat >> .config <<EOF
+          #
+          # ========================固件定制部分========================
+          #
+          CONFIG_TARGET_ipq40xx=y
+          CONFIG_TARGET_ipq40xx_DEVICE_hiwifi_c526a=y
+          CONFIG_TARGET_BOARD="ipq40xx"
+          # CONFIG_LIBCURL_UNIX_SOCKETS is not set
+          CONFIG_LUA_ECO_OPENSSL=y
+          # CONFIG_LUA_ECO_WOLFSSL is not set
+          CONFIG_PACKAGE_bash=y
+          CONFIG_PACKAGE_boost=y
+          CONFIG_PACKAGE_boost-date_time=y
+          CONFIG_PACKAGE_boost-program_options=y
+          CONFIG_PACKAGE_boost-system=y
+          CONFIG_PACKAGE_coreutils-nohup=y
+          CONFIG_PACKAGE_haproxy=y
+          CONFIG_PACKAGE_hysteria=y
+          CONFIG_PACKAGE_ipt2socks=y
+          CONFIG_PACKAGE_iptables-mod-conntrack-extra=y
+          CONFIG_PACKAGE_iptables-mod-iprange=y
+          CONFIG_PACKAGE_iptables-mod-nat-extra=y
+          CONFIG_PACKAGE_iptables-mod-socket=y
+          CONFIG_PACKAGE_iputils-arping=y
+          CONFIG_PACKAGE_jq=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-ipt-conntrack-extra=y
+          CONFIG_PACKAGE_kmod-ipt-iprange=y
+          CONFIG_PACKAGE_kmod-ipt-nat-extra=y
+          CONFIG_PACKAGE_kmod-ipt-socket=y
+          CONFIG_PACKAGE_kmod-nf-socket=y
+          CONFIG_PACKAGE_koolproxy=y
+          CONFIG_PACKAGE_libcap-bin=y
+          CONFIG_PACKAGE_libcap-bin-capsh-shell="/bin/sh"
+          CONFIG_PACKAGE_libltdl=y
+          CONFIG_PACKAGE_liblua5.3=y
+          CONFIG_PACKAGE_liblzma=y
+          CONFIG_PACKAGE_libmaxminddb=y
+          CONFIG_PACKAGE_libruby=y
+          CONFIG_PACKAGE_libyaml=y
+          CONFIG_PACKAGE_lua-cjson=y
+          CONFIG_PACKAGE_lua-maxminddb=y
+          CONFIG_PACKAGE_luasocket=y
+          CONFIG_PACKAGE_luci-app-adguardhome=y
+          # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
+          CONFIG_PACKAGE_luci-app-bypass=y
+          CONFIG_PACKAGE_luci-app-design-config=y
+          CONFIG_PACKAGE_luci-app-ikoolproxy=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+          CONFIG_PACKAGE_luci-app-pushbot=y
+          CONFIG_PACKAGE_luci-app-smartdns=y
+          CONFIG_PACKAGE_luci-app-vssr=y
+          CONFIG_PACKAGE_luci-app-wrtbwmon=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-bypass-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-design-config-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-vssr-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-wrtbwmon-zh-cn=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_luci-theme-design=y
+          CONFIG_PACKAGE_luci-theme-netgear=y
+          CONFIG_PACKAGE_ruby=y
+          CONFIG_PACKAGE_ruby-bigdecimal=y
+          CONFIG_PACKAGE_ruby-date=y
+          CONFIG_PACKAGE_ruby-digest=y
+          CONFIG_PACKAGE_ruby-enc=y
+          CONFIG_PACKAGE_ruby-forwardable=y
+          CONFIG_PACKAGE_ruby-pstore=y
+          CONFIG_PACKAGE_ruby-psych=y
+          CONFIG_PACKAGE_ruby-stringio=y
+          CONFIG_PACKAGE_ruby-strscan=y
+          CONFIG_PACKAGE_ruby-yaml=y
+          CONFIG_PACKAGE_smartdns=y
+          CONFIG_PACKAGE_trojan=y
+          CONFIG_PACKAGE_trojan-plus=y
+          CONFIG_PACKAGE_unzip=y
+          CONFIG_PACKAGE_v2ray-core=y
+          CONFIG_PACKAGE_v2ray-plugin=y
+          CONFIG_PACKAGE_xray-plugin=y
+          CONFIG_PACKAGE_xz=y
+          CONFIG_PACKAGE_xz-utils=y
+          CONFIG_boost-compile-visibility-hidden=y
+          CONFIG_boost-runtime-shared=y
+          CONFIG_boost-static-and-shared-libs=y
+          CONFIG_boost-variant-release=y
+          #
+          # ========================固件定制部分结束========================
+          #
+          EOF
+          sed -i 's/^[ \t]*//g' ./.config
+          make defconfig
+          
+      - name: Make download
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile firmware
         run: |
@@ -68,26 +203,38 @@ jobs:
 
       - name: Prepare artifact
         run: |
+          mkdir -p ./artifact/firmware
           mkdir -p ./artifact/package
           mkdir -p ./artifact/buildinfo
           rm -rf $(find ./bin/targets/ -type d -name "packages")
+          cp -rf $(find ./bin/targets/ -type f) ./artifact/firmware/
           cp -rf $(find ./bin/packages/ -type f -name "*.ipk") ./artifact/package/
           cp -rf $(find ./bin/targets/ -type f -name "*.buildinfo" -o -name "*.manifest") ./artifact/buildinfo/
 
-      - name: Upload buildinfo
+      - name: Deliver buildinfo
         uses: actions/upload-artifact@v3
         with:
           name: OpenWrt_buildinfo
           path: ./artifact/buildinfo/
 
-      - name: Upload package
+      - name: Deliver package
         uses: actions/upload-artifact@v3
         with:
           name: OpenWrt_package
           path: ./artifact/package/
 
-      - name: Upload firmware
+      - name: Deliver firmware
         uses: actions/upload-artifact@v3
         with:
           name: OpenWrt_firmware
           path: ./bin/targets/
+  
+
+      - name: Upload release asset
+        if: github.event == 'release'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.YOURTOKEN }}
+          file: ./artifact/firmware/*
+          tag: ${{ github.ref }}
+          file_glob: true
